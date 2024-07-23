@@ -1,0 +1,162 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${CATV_LINE_LENGTH:=80}"
+
+# function to print usage
+print_usage() {
+    echo "Usage:"
+    echo "  catv <file.csv> -c col1,col2,col3 [-h num_lines]"
+    echo ""
+    echo "Options:"
+    echo "  -c col1,col2,col3  Specify columns to display"
+    echo "  -h num_lines              Display only the first num_lines of the CSV"
+    echo ""
+    echo "Environment variables:"
+    echo "  CATV_LINE_LENGTH: Set the total line length (default: 80)"
+    exit 1
+}
+
+FILE=""
+COLUMNS=()
+HEAD_LINES=""
+
+# parse options
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -c)
+            IFS=',' read -ra COLUMNS <<< "$2"
+            shift 2
+            ;;
+        -h)
+            HEAD_LINES="$2"
+            shift 2
+            ;;
+        *)
+            if [[ -z $FILE ]]; then
+                FILE=$1
+                shift
+            else
+                print_usage
+            fi
+            ;;
+    esac
+done
+
+if [[ -z $FILE || ${#COLUMNS[@]} -eq 0 ]]; then
+    print_usage
+fi
+
+# check if file exists
+if [ ! -f "$FILE" ]; then
+    echo "Error: File not found!"
+    exit 1
+fi
+
+# get terminal width
+TERM_WIDTH=$CATV_LINE_LENGTH
+
+# read header
+IFS=',' read -r -a HEADER < "$FILE"
+
+# select columns based on input
+SELECTED_COLUMNS=("Line" "${COLUMNS[@]}")
+
+# get max width for each column
+COLUMN_WIDTHS=(4)  # Start with width 4 for "Line"
+for col in "${COLUMNS[@]}"; do
+    COLUMN_WIDTHS+=(${#col})
+done
+
+line_number=0
+while IFS=',' read -r -a line; do
+    line_number=$((line_number + 1))
+    COLUMN_WIDTHS[0]=$(( ${#line_number} > ${COLUMN_WIDTHS[0]} ? ${#line_number} : ${COLUMN_WIDTHS[0]} ))
+    for i in "${!COLUMNS[@]}"; do
+        col="${COLUMNS[$i]}"
+        index=$(printf '%s\n' "${HEADER[@]}" | grep -n "^${col}$" | cut -d: -f1)
+        index=$((index-1))
+        current_width=${#line[$index]}
+        if [ $current_width -gt ${COLUMN_WIDTHS[$i+1]} ]; then
+            COLUMN_WIDTHS[$i+1]=$current_width
+        fi
+    done
+done < "$FILE"
+
+# calculate total width and adjust if necessary
+total_width=0
+for width in "${COLUMN_WIDTHS[@]}"; do
+    total_width=$((total_width + width + 3))  # +3 for | and spaces
+done
+total_width=$((total_width + 1))  # +1 for the final |
+
+if [ $total_width -gt $TERM_WIDTH ]; then
+    excess=$((total_width - TERM_WIDTH))
+    while [ $excess -gt 0 ]; do
+        for i in "${!COLUMN_WIDTHS[@]}"; do
+            if [ ${COLUMN_WIDTHS[$i]} -gt 3 ] && [ $excess -gt 0 ]; then
+                COLUMN_WIDTHS[$i]=$((COLUMN_WIDTHS[$i] - 1))
+                excess=$((excess - 1))
+            fi
+        done
+    done
+fi
+
+# function to create separator line
+create_separator() {
+    local sep="+"
+    for width in "${COLUMN_WIDTHS[@]}"; do
+        sep="${sep}$(printf '%0.s-' $(seq 1 $((width + 2))))"
+        sep="${sep}+"
+    done
+    echo "$sep"
+}
+
+# create temporary file for output
+TEMP_FILE=$(mktemp)
+
+# write header
+create_separator >> "$TEMP_FILE"
+printf "| %-*s " ${COLUMN_WIDTHS[0]} "Line" >> "$TEMP_FILE"
+for i in "${!COLUMNS[@]}"; do
+    printf "| %-*s " ${COLUMN_WIDTHS[$i+1]} "${COLUMNS[$i]}" >> "$TEMP_FILE"
+done
+printf "|\n" >> "$TEMP_FILE"
+create_separator >> "$TEMP_FILE"
+
+# write data
+line_number=0
+if [[ -n $HEAD_LINES ]]; then
+    tail -n +2 "$FILE" | head -n "$HEAD_LINES" | while IFS=',' read -r -a line; do
+        line_number=$((line_number + 1))
+        printf "| %-*s " ${COLUMN_WIDTHS[0]} "$line_number" >> "$TEMP_FILE"
+        for i in "${!COLUMNS[@]}"; do
+            col="${COLUMNS[$i]}"
+            index=$(printf '%s\n' "${HEADER[@]}" | grep -n "^${col}$" | cut -d: -f1)
+            index=$((index-1))
+            printf "| %-*s " ${COLUMN_WIDTHS[$i+1]} "${line[$index]}" >> "$TEMP_FILE"
+        done
+        printf "|\n" >> "$TEMP_FILE"
+    done
+else
+    tail -n +2 "$FILE" | while IFS=',' read -r -a line; do
+        line_number=$((line_number + 1))
+        printf "| %-*s " ${COLUMN_WIDTHS[0]} "$line_number" >> "$TEMP_FILE"
+        for i in "${!COLUMNS[@]}"; do
+            col="${COLUMNS[$i]}"
+            index=$(printf '%s\n' "${HEADER[@]}" | grep -n "^${col}$" | cut -d: -f1)
+            index=$((index-1))
+            printf "| %-*s " ${COLUMN_WIDTHS[$i+1]} "${line[$index]}" >> "$TEMP_FILE"
+        done
+        printf "|\n" >> "$TEMP_FILE"
+    done
+fi
+
+create_separator >> "$TEMP_FILE"
+
+# display output using less
+less -S "$TEMP_FILE"
+
+# clean up
+rm "$TEMP_FILE"
